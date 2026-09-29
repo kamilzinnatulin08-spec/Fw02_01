@@ -1,0 +1,45 @@
+#!/bin/bash
+# FW: имя, IP во внутренней сети, nftables (NAT для выхода в интернет)
+# Если интерфейсы наоборот: WAN_IF=ens19 LAN_IF=ens18 bash 1_fw.sh
+WAN_IF="${WAN_IF:-ens18}"   # в сторону ISP
+LAN_IF="${LAN_IF:-ens19}"   # в локальную сеть
+[ "$(id -u)" -eq 0 ] || { echo "Запускать от root"; exit 1; }
+nm_set() { # iface ip [gw] [dns]
+  local ifc="$1" ip="$2" gw="${3:-}" dns="${4:-}" con
+  con=$(nmcli -g GENERAL.CONNECTION dev show "$ifc" 2>/dev/null)
+  if [ -z "$con" ] || [ "$con" = "--" ]; then
+    nmcli con add type ethernet ifname "$ifc" con-name "$ifc"; con="$ifc"
+  fi
+  local args=(ipv4.method manual ipv4.addresses "$ip/24")
+  [ -n "$gw" ]  && args+=(ipv4.gateway "$gw")
+  [ -n "$dns" ] && args+=(ipv4.dns "$dns" ipv4.ignore-auto-dns yes)
+  nmcli con mod "$con" "${args[@]}"
+  nmcli con up "$con"
+}
+hostnamectl set-hostname fw.mon.lab
+nm_set "$LAN_IF" 172.16.2.254
+
+dnf install -y nftables
+systemctl disable --now firewalld 2>/dev/null
+
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-forward.conf
+sysctl -p /etc/sysctl.d/99-forward.conf
+
+cat > /etc/sysconfig/nftables.conf <<EOT
+flush ruleset
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority 100; policy accept;
+    oifname "$WAN_IF" masquerade
+  }
+}
+table ip filter {
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+  }
+}
+EOT
+nft -f /etc/sysconfig/nftables.conf
+systemctl enable --now nftables
+nft list ruleset
+echo "FW готов"
