@@ -1,0 +1,50 @@
+#!/bin/bash
+# SRV2: имя, IP, DHCP-сервер, пересылка логов на LOG по UDP
+IF="${IF:-ens18}"
+[ "$(id -u)" -eq 0 ] || { echo "Запускать от root"; exit 1; }
+nm_set() { # iface ip [gw] [dns]
+  local ifc="$1" ip="$2" gw="${3:-}" dns="${4:-}" con
+  con=$(nmcli -g GENERAL.CONNECTION dev show "$ifc" 2>/dev/null)
+  if [ -z "$con" ] || [ "$con" = "--" ]; then
+    nmcli con add type ethernet ifname "$ifc" con-name "$ifc"; con="$ifc"
+  fi
+  local args=(ipv4.method manual ipv4.addresses "$ip/24")
+  [ -n "$gw" ]  && args+=(ipv4.gateway "$gw")
+  [ -n "$dns" ] && args+=(ipv4.dns "$dns" ipv4.ignore-auto-dns yes)
+  nmcli con mod "$con" "${args[@]}"
+  nmcli con up "$con"
+}
+hostnamectl set-hostname srv2.mon.lab
+nm_set "$IF" 172.16.2.20 172.16.2.254 172.16.2.10
+
+dnf install -y dhcp-server rsyslog
+
+cat > /etc/dhcp/dhcpd.conf <<'EOT'
+authoritative;
+default-lease-time 1800;
+max-lease-time 1800;
+subnet 172.16.2.0 netmask 255.255.255.0 {
+  range 172.16.2.101 172.16.2.150;
+  option routers 172.16.2.254;
+  option domain-name-servers 172.16.2.10;
+  option domain-name "mon.lab";
+}
+EOT
+dhcpd -t -cf /etc/dhcp/dhcpd.conf || exit 1
+systemctl enable --now dhcpd
+systemctl restart dhcpd
+
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-port=67/udp
+  firewall-cmd --reload
+fi
+
+# пересылка ВСЕХ логов на LOG по UDP
+cat > /etc/rsyslog.d/90-forward.conf <<'EOT'
+*.* action(type="omfwd" target="172.16.2.30" port="514" protocol="udp")
+EOT
+systemctl enable --now rsyslog
+systemctl restart rsyslog
+
+systemctl status dhcpd --no-pager | head -5
+echo "SRV2 готов"
