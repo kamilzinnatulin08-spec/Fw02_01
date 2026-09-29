@@ -1,0 +1,93 @@
+#!/bin/bash
+# SRV1: имя, IP, DNS-сервер bind (зоны прямая/обратная, A, PTR, CNAME), пересылка логов на LOG по TCP
+IF="${IF:-ens18}"
+[ "$(id -u)" -eq 0 ] || { echo "Запускать от root"; exit 1; }
+nm_set() { # iface ip [gw] [dns]
+  local ifc="$1" ip="$2" gw="${3:-}" dns="${4:-}" con
+  con=$(nmcli -g GENERAL.CONNECTION dev show "$ifc" 2>/dev/null)
+  if [ -z "$con" ] || [ "$con" = "--" ]; then
+    nmcli con add type ethernet ifname "$ifc" con-name "$ifc"; con="$ifc"
+  fi
+  local args=(ipv4.method manual ipv4.addresses "$ip/24")
+  [ -n "$gw" ]  && args+=(ipv4.gateway "$gw")
+  [ -n "$dns" ] && args+=(ipv4.dns "$dns" ipv4.ignore-auto-dns yes)
+  nmcli con mod "$con" "${args[@]}"
+  nmcli con up "$con"
+}
+hostnamectl set-hostname srv1.mon.lab
+nm_set "$IF" 172.16.2.10 172.16.2.254 "172.16.2.10 77.88.8.8"
+
+dnf install -y bind bind-utils rsyslog
+
+[ -f /etc/named.conf.orig ] || cp /etc/named.conf /etc/named.conf.orig
+cat > /etc/named.conf <<'EOT'
+options {
+    listen-on port 53 { any; };
+    listen-on-v6 { none; };
+    directory "/var/named";
+    dump-file "/var/named/data/cache_dump.db";
+    statistics-file "/var/named/data/named_stats.txt";
+    memstatistics-file "/var/named/data/named_mem_stats.txt";
+    allow-query { any; };
+    recursion yes;
+    allow-recursion { 127.0.0.1; 172.16.2.0/24; };
+    forwarders { 77.88.8.8; };
+    dnssec-validation no;
+};
+logging {
+    channel default_debug { file "data/named.run"; severity dynamic; };
+    category default { default_syslog; default_debug; };
+};
+zone "mon.lab" IN { type master; file "mon.lab.zone"; };
+zone "2.16.172.in-addr.arpa" IN { type master; file "2.16.172.zone"; };
+EOT
+
+cat > /var/named/mon.lab.zone <<'EOT'
+$TTL 1h
+@       IN SOA srv1.mon.lab. admin.mon.lab. ( 1 1h 15m 1w 1h )
+@       IN NS  srv1.mon.lab.
+srv1    IN A   172.16.2.10
+srv2    IN A   172.16.2.20
+log     IN A   172.16.2.30
+admin   IN A   172.16.2.99
+fw      IN A   172.16.2.254
+syslog  IN CNAME log.mon.lab.
+EOT
+
+cat > /var/named/2.16.172.zone <<'EOT'
+$TTL 1h
+@   IN SOA srv1.mon.lab. admin.mon.lab. ( 1 1h 15m 1w 1h )
+@   IN NS  srv1.mon.lab.
+10  IN PTR srv1.mon.lab.
+20  IN PTR srv2.mon.lab.
+30  IN PTR log.mon.lab.
+99  IN PTR admin.mon.lab.
+254 IN PTR fw.mon.lab.
+EOT
+
+chown root:named /var/named/*.zone
+chmod 640 /var/named/*.zone
+named-checkconf || exit 1
+named-checkzone mon.lab /var/named/mon.lab.zone
+named-checkzone 2.16.172.in-addr.arpa /var/named/2.16.172.zone
+
+systemctl enable --now named
+systemctl restart named
+
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-port=53/tcp --add-port=53/udp
+  firewall-cmd --reload
+fi
+
+# пересылка ВСЕХ логов на LOG по TCP
+cat > /etc/rsyslog.d/90-forward.conf <<'EOT'
+*.* action(type="omfwd" target="172.16.2.30" port="514" protocol="tcp"
+           action.resumeRetryCount="-1" queue.type="LinkedList" queue.size="10000")
+EOT
+systemctl enable --now rsyslog
+systemctl restart rsyslog
+
+echo "--- проверка ---"
+dig +short @127.0.0.1 syslog.mon.lab
+dig +short -x 172.16.2.30 @127.0.0.1
+echo "SRV1 готов"
