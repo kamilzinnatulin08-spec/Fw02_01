@@ -1,0 +1,53 @@
+#!/bin/bash
+# LOG: имя, IP, rsyslog-сервер (локальные правила, приём по tcp/udp, раскладка по файлам)
+IF="${IF:-ens18}"
+[ "$(id -u)" -eq 0 ] || { echo "Запускать от root"; exit 1; }
+nm_set() { # iface ip [gw] [dns]
+  local ifc="$1" ip="$2" gw="${3:-}" dns="${4:-}" con
+  con=$(nmcli -g GENERAL.CONNECTION dev show "$ifc" 2>/dev/null)
+  if [ -z "$con" ] || [ "$con" = "--" ]; then
+    nmcli con add type ethernet ifname "$ifc" con-name "$ifc"; con="$ifc"
+  fi
+  local args=(ipv4.method manual ipv4.addresses "$ip/24")
+  [ -n "$gw" ]  && args+=(ipv4.gateway "$gw")
+  [ -n "$dns" ] && args+=(ipv4.dns "$dns" ipv4.ignore-auto-dns yes)
+  nmcli con mod "$con" "${args[@]}"
+  nmcli con up "$con"
+}
+hostnamectl set-hostname log.mon.lab
+nm_set "$IF" 172.16.2.30 172.16.2.254 172.16.2.10
+
+dnf install -y rsyslog
+mkdir -p /var/log/OurLOG/{LOG,SRV1,SRV2,services}
+
+# ruleset описан ДО input'ов, которые на него ссылаются
+cat > /etc/rsyslog.d/10-ourlog.conf <<'EOT'
+# ---- удалённые логи ----
+ruleset(name="remote") {
+  if $fromhost-ip == '172.16.2.10' then action(type="omfile" file="/var/log/OurLOG/SRV1/all.log")
+  if $fromhost-ip == '172.16.2.20' then action(type="omfile" file="/var/log/OurLOG/SRV2/all.log")
+  if $programname == 'named' then action(type="omfile" file="/var/log/OurLOG/services/named.log")
+  if $programname == 'dhcpd' then action(type="omfile" file="/var/log/OurLOG/services/dhcpd.log")
+}
+module(load="imtcp")
+module(load="imudp")
+input(type="imtcp" port="514" ruleset="remote")
+input(type="imudp" port="514" ruleset="remote")
+
+# ---- локальные логи LOG ----
+auth,authpriv.err   /var/log/OurLOG/LOG/auth.err
+*.crit              /var/log/OurLOG/LOG/crit.log
+if $programname == 'sshd' then /var/log/OurLOG/LOG/sshd.log
+EOT
+
+rsyslogd -N1 || exit 1
+systemctl enable --now rsyslog
+systemctl restart rsyslog
+
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-port=514/tcp --add-port=514/udp
+  firewall-cmd --reload
+fi
+
+ss -tulnp | grep 514
+echo "LOG готов (Loganalyzer ставится отдельно)"
