@@ -1,0 +1,511 @@
+#!/bin/bash
+# =====================================================================
+# practice.sh - все практические работы в одном файле (БЕЗ проверок)
+#
+#   bash practice.sh bash1            02.02 №1: info/workspace/backup/find_files/organizer/assistant
+#   bash practice.sh bash2            02.02 №2: create_lab2.sh, create_data_2_3.sh, lab2.sh
+#   bash practice.sh bash3            02.02 №3: process_analyzer.sh
+#   sudo bash practice.sh syslog2     02.01 №2: rsyslog, правила local0/local1
+#   sudo bash practice.sh nginx4 <фамилия>   02.01 №4: nginx + rsyslog
+#   sudo bash practice.sh all <фамилия>      всё сразу
+#
+# 02.01 №1 (journalctl) - теория, готовить там нечего.
+# =====================================================================
+set -u
+
+# ---- чьи домашний каталог и права использовать ----
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  U_NAME="$SUDO_USER"
+  U_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+else
+  U_NAME="$(id -un)"
+  U_HOME="$HOME"
+fi
+
+die()       { echo "Ошибка: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "эта тема запускается от root (sudo bash $0 ...)"; }
+
+# команда от имени обычного пользователя (если запущено через sudo)
+as_user() {
+  if [ "$(id -u)" -eq 0 ] && [ "$U_NAME" != "root" ]; then
+    runuser -u "$U_NAME" -- env HOME="$U_HOME" "$@"
+  else
+    "$@"
+  fi
+}
+
+# put <файл> <права> < содержимое   (файл принадлежит обычному пользователю)
+put() {
+  as_user tee "$1" > /dev/null
+  as_user chmod "$2" "$1"
+}
+
+# =====================================================================
+# 02.02 №1. Первые Bash-скрипты
+# =====================================================================
+bash1() {
+  echo ">>> 02.02 №1: скрипты в $U_HOME"
+
+  put "$U_HOME/info.sh" 755 <<'PUT_END'
+#!/bin/bash
+echo "Пользователь: $(whoami)"
+echo "Текущая директория: $(pwd)"
+echo "Имя компьютера: $(hostname)"
+echo "Дата и время: $(date '+%d.%m.%Y %H:%M:%S')"
+PUT_END
+
+  put "$U_HOME/workspace.sh" 755 <<'PUT_END'
+#!/bin/bash
+# Создаёт рабочую область в домашнем каталоге
+WS="$HOME/workspace"
+mkdir -p "$WS"/{documents,scripts,projects,inbox}
+echo "Рабочая область создана: $WS"
+ls -1 "$WS"
+PUT_END
+
+  put "$U_HOME/backup.sh" 755 <<'PUT_END'
+#!/bin/bash
+# Резервная копия ~/workspace в ~/backup
+SRC="$HOME/workspace"
+DST="$HOME/backup"
+
+if [ ! -d "$SRC" ]
+then
+    echo "Каталог $SRC не найден. Сначала выполните workspace.sh"
+    exit 1
+fi
+
+mkdir -p "$DST"
+NAME="backup_$(date +%Y-%m-%d_%H-%M-%S).tar.gz"
+
+if tar -czf "$DST/$NAME" -C "$HOME" workspace
+then
+    echo "Резервная копия создана: $DST/$NAME"
+else
+    echo "Не удалось создать резервную копию."
+    exit 1
+fi
+PUT_END
+
+  put "$U_HOME/find_files.sh" 755 <<'PUT_END'
+#!/bin/bash
+# Поиск файлов по маске в домашнем каталоге (маска - параметр или ввод)
+if [ $# -ge 1 ]
+then
+    pattern="$1"
+else
+    read -rp "Что искать (например *.txt): " pattern
+fi
+
+if [ -z "$pattern" ]
+then
+    echo "Пустой запрос."
+    exit 1
+fi
+
+result=$(find "$HOME" -type f -name "$pattern" 2>/dev/null)
+
+if [ -z "$result" ]
+then
+    echo "Ничего не найдено."
+else
+    echo "$result"
+    echo "Найдено файлов: $(echo "$result" | wc -l)"
+fi
+PUT_END
+
+  put "$U_HOME/organizer.sh" 755 <<'PUT_END'
+#!/bin/bash
+# Раскладывает файлы из ~/workspace/inbox по подкаталогам по расширению
+DIR="${1:-$HOME/workspace/inbox}"
+
+if [ ! -d "$DIR" ]
+then
+    echo "Каталог $DIR не найден."
+    exit 1
+fi
+
+moved=0
+for file in "$DIR"/*
+do
+    [ -f "$file" ] || continue
+    name=$(basename "$file")
+    if [[ "$name" == *.* ]]
+    then
+        ext="${name##*.}"
+    else
+        ext="other"
+    fi
+    mkdir -p "$DIR/$ext"
+    mv -n "$file" "$DIR/$ext/"
+    ((moved++))
+done
+echo "Перемещено файлов: $moved"
+PUT_END
+
+  # Меню: финальная версия - после действия возврат в меню
+  put "$U_HOME/assistant.sh" 755 <<'PUT_END'
+#!/bin/bash
+while true
+do
+    echo "=============================="
+    echo "        ПОМОЩНИК"
+    echo "=============================="
+    echo "1. Информация о пользователе"
+    echo "2. Рабочая область"
+    echo "3. Резервная копия"
+    echo "4. Поиск файлов"
+    echo "5. Организатор файлов"
+    echo "6. Выход"
+    echo "=============================="
+    read -rp "Выберите пункт: " choice
+
+    case "$choice" in
+        1)
+            bash ~/info.sh
+            ;;
+        2)
+            bash ~/workspace.sh
+            ;;
+        3)
+            bash ~/backup.sh
+            ;;
+        4)
+            bash ~/find_files.sh
+            ;;
+        5)
+            bash ~/organizer.sh
+            ;;
+        6)
+            echo "До свидания!"
+            exit 0
+            ;;
+        *)
+            echo "Неизвестный пункт меню."
+            ;;
+    esac
+    echo
+done
+PUT_END
+
+  echo "Готово. Запуск меню: bash ~/assistant.sh"
+}
+
+# =====================================================================
+# 02.02 №2. Файловая структура, счётчики, функции
+# =====================================================================
+bash2() {
+  echo ">>> 02.02 №2: файлы в $U_HOME"
+  as_user mkdir -p "$U_HOME/bash_lab2"
+
+  # ---- готовое решение lab2.sh (части 1-3) ----
+  put "$U_HOME/bash_lab2/lab2.sh" 755 <<'PUT_END'
+#!/bin/bash
+cd "$HOME/bash_lab2" || { echo "Нет каталога ~/bash_lab2"; exit 1; }
+
+analyze_directory()
+{
+    local dir="$1"
+    local files=0
+    local directories=0
+    local files_empty=0
+    local files_full=0
+    local item
+
+    if [ -z "$dir" ]
+    then
+        echo "Ошибка: не указан каталог"
+        return 1
+    fi
+
+    if [ ! -d "$dir" ]
+    then
+        echo "Ошибка: каталог '$dir' не существует"
+        return 1
+    fi
+
+    echo "Анализ: $dir"
+
+    for item in $(find "$dir" -mindepth 1 | sort -V)
+    do
+        if [ -d "$item" ]
+        then
+            echo "Каталог: $item"
+            ((directories++))
+        elif [ -f "$item" ]
+        then
+            echo "Файл: $item"
+            ((files++))
+
+            if [ -s "$item" ]
+            then
+                ((files_full++))
+            else
+                ((files_empty++))
+            fi
+        fi
+    done
+
+    echo "Всего файлов: $files"
+    echo "Всего каталогов: $directories"
+    echo "Всего пустых файлов: $files_empty"
+    echo "Всего не пустых файлов: $files_full"
+}
+
+analyze_directory data
+echo
+analyze_directory data_2
+echo
+analyze_directory data_3
+PUT_END
+
+  # ---- ~/create_lab2.sh (генератор data) ----
+  put "$U_HOME/create_lab2.sh" 755 <<'PUT_END'
+#!/bin/bash
+WORK_DIR="$HOME/bash_lab2"
+
+mkdir -p "$WORK_DIR"
+rm -rf "$WORK_DIR/data"
+mkdir -p "$WORK_DIR/data"
+
+DIR_COUNT=$((RANDOM % 8 + 3))
+FILE_COUNT=$((RANDOM % 21 + 30))
+
+for ((i=1; i<=DIR_COUNT; i++))
+do
+    mkdir -p "$WORK_DIR/data/dir_$i"
+done
+
+for ((i=1; i<=FILE_COUNT; i++))
+do
+    DIR_NUM=$((RANDOM % DIR_COUNT + 1))
+    FILE="$WORK_DIR/data/dir_$DIR_NUM/file_$i.txt"
+
+    if (( RANDOM % 4 == 0 ))
+    then
+        touch "$FILE"
+    else
+        echo "Тестовые данные файла $i" > "$FILE"
+    fi
+done
+
+# заготовку lab2.sh создаём только если решения ещё нет,
+# чтобы повторный запуск генератора не затирал программу
+if [ ! -f "$WORK_DIR/lab2.sh" ]
+then
+cat > "$WORK_DIR/lab2.sh" << 'EOF'
+#!/bin/bash
+EOF
+fi
+
+chmod +x "$WORK_DIR/lab2.sh"
+
+echo "Тестовая среда создана: $WORK_DIR"
+PUT_END
+
+  # ---- ~/create_data_2_3.sh (data_2, data_3) ----
+  put "$U_HOME/create_data_2_3.sh" 755 <<'PUT_END'
+#!/bin/bash
+
+WORK_DIR="$HOME/bash_lab2"
+
+create_data()
+{
+    DATA_DIR="$WORK_DIR/$1"
+
+    rm -rf "$DATA_DIR"
+    mkdir -p "$DATA_DIR"
+
+    DIR_COUNT=$((RANDOM % 6 + 2))
+    FILE_COUNT=$((RANDOM % 16 + 15))
+
+    for ((i=1; i<=DIR_COUNT; i++))
+    do
+        mkdir -p "$DATA_DIR/dir_$i"
+    done
+
+    for ((i=1; i<=FILE_COUNT; i++))
+    do
+        DIR_NUM=$((RANDOM % DIR_COUNT + 1))
+        FILE="$DATA_DIR/dir_$DIR_NUM/file_$i.txt"
+
+        if (( RANDOM % 3 == 0 ))
+        then
+            touch "$FILE"
+        else
+            echo "Тестовые данные файла $i" > "$FILE"
+        fi
+    done
+}
+
+create_data "data_2"
+create_data "data_3"
+
+echo "Дополнительные тестовые данные созданы."
+PUT_END
+
+  # подготовка тестовой среды (пункт 1 и пункт 2 части 3)
+  as_user bash "$U_HOME/create_lab2.sh"
+  as_user bash "$U_HOME/create_data_2_3.sh"
+
+  echo "Готово. Анализ: cd ~/bash_lab2 && ./lab2.sh"
+}
+
+# =====================================================================
+# 02.02 №3. Анализ процессов
+# =====================================================================
+bash3() {
+  echo ">>> 02.02 №3: process_analyzer.sh в $U_HOME"
+
+  put "$U_HOME/process_analyzer.sh" 755 <<'PUT_END'
+#!/bin/bash
+# Анализ процессов Linux. Все значения определяются во время запуска.
+export LC_ALL=C
+
+current_user=$(whoami)
+
+# user, pid, %cpu, %mem, команда - по строке на процесс, без заголовка
+ps_data=$(ps -eo user:32=,pid=,pcpu=,pmem=,comm=)
+
+process_count=$(echo "$ps_data" | wc -l)
+user_count=$(echo "$ps_data" | awk -v u="$current_user" '$1 == u' | wc -l)
+other_count=$((process_count - user_count))
+
+# $1 - заголовок, $2 - номер столбца (3 = CPU, 4 = MEM), $3 - подпись
+show_top_process()
+{
+    local title="$1"
+    local column="$2"
+    local label="$3"
+    local line pid name value
+
+    line=$(echo "$ps_data" | sort -k"$column" -nr | head -n 1)
+    pid=$(echo "$line" | awk '{print $2}')
+    value=$(echo "$line" | awk -v c="$column" '{print $c}')
+    name=$(echo "$line" | awk '{$1=$2=$3=$4=""; sub(/^ +/, ""); print}')
+
+    echo "$title"
+    echo "PID: $pid"
+    echo "Процесс: $name"
+    echo "$label: ${value}%"
+}
+
+echo "========================================"
+echo "АНАЛИЗ ПРОЦЕССОВ LINUX"
+echo "========================================"
+echo "Всего процессов: $process_count"
+echo "Процессов пользователя: $user_count"
+echo "Остальных процессов: $other_count"
+echo
+show_top_process "Наибольшая загрузка CPU:" 3 "CPU"
+echo
+show_top_process "Наибольшее потребление памяти:" 4 "MEM"
+echo "========================================"
+PUT_END
+
+  echo "Готово. Запуск: ./process_analyzer.sh"
+}
+
+# =====================================================================
+# 02.01 №2. Локальное журналирование rsyslog (задание 13)
+# =====================================================================
+syslog2() {
+  need_root
+  echo ">>> 02.01 №2: rsyslog"
+  dnf install -y rsyslog || die "не удалось установить rsyslog"
+
+  cat > /etc/rsyslog.d/lab2.conf <<'EOF'
+# Практическая №2: собственные правила
+local1.*          /var/log/lab2-local1.log
+local0.warning    /var/log/lab2-local0.log
+EOF
+
+  touch /var/log/lab2-local0.log /var/log/lab2-local1.log
+  rsyslogd -N1 || die "ошибка в конфигурации rsyslog"
+  systemctl enable --now rsyslog
+  systemctl restart rsyslog
+  echo "Готово: правила в /etc/rsyslog.d/lab2.conf"
+}
+
+# =====================================================================
+# 02.01 №4. Nginx + rsyslog
+# =====================================================================
+nginx4() {
+  need_root
+  local X="${1:-}"
+  [ -n "$X" ] || die "укажите фамилию латиницей: sudo bash $0 nginx4 ivanov"
+  X="$(echo "$X" | tr 'A-Z' 'a-z')"
+  echo "$X" | grep -Eq '^[a-z0-9-]+$' || die "фамилия: только латиница/цифры/дефис"
+
+  echo ">>> 02.01 №4: nginx.$X.lab"
+  dnf install -y nginx rsyslog || die "не удалось установить пакеты"
+
+  # --- rsyslog: приём сообщений nginx на 127.0.0.1:514/udp ---
+  if ! ss -uln | grep -q ':514 '
+  then
+    cat > /etc/rsyslog.d/20-nginx-input.conf <<'EOF'
+module(load="imudp")
+input(type="imudp" address="127.0.0.1" port="514")
+EOF
+  fi
+
+  # --- rsyslog: два правила ---
+  cat > /etc/rsyslog.d/30-nginx.conf <<'EOF'
+if ($programname == 'mynginx') then /var/log/mynginx.log
+if ($programname == 'nginx') then /var/log/allnginx.log
+EOF
+
+  # --- nginx: access_log основного сервера через syslog ---
+  [ -f /etc/nginx/nginx.conf.orig ] || cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
+  if ! grep -q 'access_log syslog:' /etc/nginx/nginx.conf
+  then
+    sed -i -E 's#^([[:space:]]*)access_log[[:space:]]+/var/log/nginx/access\.log[^;]*;#\1access_log syslog:server=127.0.0.1:514,facility=local0,tag=nginx;#' \
+      /etc/nginx/nginx.conf
+  fi
+
+  # --- виртуальный сервер ---
+  mkdir -p "/var/www/nginx.$X.lab"
+  echo "<h1>nginx.$X.lab</h1>" > "/var/www/nginx.$X.lab/index.html"
+
+  cat > "/etc/nginx/conf.d/nginx.$X.lab.conf" <<EOF
+server {
+    listen 80;
+    server_name nginx.$X.lab;
+
+    root /var/www/nginx.$X.lab;
+    index index.html;
+
+    access_log syslog:server=127.0.0.1:514,facility=local0,tag=mynginx;
+}
+EOF
+
+  # --- имя сайта через /etc/hosts ---
+  grep -q "nginx.$X.lab" /etc/hosts || echo "127.0.0.1 nginx.$X.lab" >> /etc/hosts
+
+  # --- применение (конфигурация проверяется перед перезапуском) ---
+  nginx -t       || die "ошибка в конфигурации nginx"
+  rsyslogd -N1   || die "ошибка в конфигурации rsyslog"
+  systemctl enable --now rsyslog
+  systemctl restart rsyslog
+  systemctl enable --now nginx
+  systemctl reload nginx
+
+  echo "Готово: http://nginx.$X.lab/  (логи: /var/log/mynginx.log, /var/log/allnginx.log)"
+}
+
+# =====================================================================
+case "${1:-}" in
+  bash1)   bash1 ;;
+  bash2)   bash2 ;;
+  bash3)   bash3 ;;
+  syslog2) syslog2 ;;
+  nginx4)  nginx4 "${2:-}" ;;
+  all)
+    [ -n "${2:-}" ] || die "sudo bash $0 all <фамилия>"
+    bash1; bash2; bash3; syslog2; nginx4 "$2"
+    ;;
+  *)
+    sed -n '2,13p' "$0"
+    exit 1
+    ;;
+esac
